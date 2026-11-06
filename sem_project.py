@@ -27,7 +27,7 @@ def make_project(image, image_path, scale_points, scale, unit, roi, phase, param
     def pack(items):
       records=[]
       for item in items:
-        records.append({'points':[[[float(v) for v in a],[float(v) for v in b]] for a,b,_ in item['points']], 'source':item.get('source','自动'), 'coherence':float(item['coherence']) if item.get('coherence') is not None else None, 'contrast_score':float(item['contrast_score']) if item.get('contrast_score') is not None else None, 'contour':[[float(x),float(y)] for x,y in item.get('contour',[])], 'edge_methods':item.get('edge_methods'), 'neighbor_count':item.get('neighbor_count'), 'compact_neighbor_count':item.get('compact_neighbor_count'), 'threshold':item.get('threshold'), 'review_reason':item.get('review_reason')})
+        records.append({'points':[[[float(v) for v in a],[float(v) for v in b]] for a,b,_ in item['points']], 'source':item.get('source','自动'), 'coherence':float(item['coherence']) if item.get('coherence') is not None else None, 'contrast_score':float(item['contrast_score']) if item.get('contrast_score') is not None else None, 'contour':[[float(x),float(y)] for x,y in item.get('contour',[])], 'edge_methods':item.get('edge_methods'), 'neighbor_count':item.get('neighbor_count'), 'compact_neighbor_count':item.get('compact_neighbor_count'), 'threshold':item.get('threshold'), 'review_reason':item.get('review_reason'), 'export_selected':item.get('export_selected',True)})
       return records
     records=pack(results);unpaired_records=pack(unpaired or [])
     roi_data=None if roi is None else {'kind':'polygon' if isinstance(roi,list) else 'rectangle','points':roi}
@@ -107,7 +107,9 @@ def load_project(path, image_path=None):
           if threshold is not None and (not isinstance(threshold,(int,float)) or not math.isfinite(threshold) or not 0<=threshold<=255):raise ValueError('候选阈值无效。')
           reason=row.get('review_reason')
           if reason is not None and reason not in ('candidate','neighbor','sparse','threshold','fine'):raise ValueError('候选来源无效。')
-          rows.append({'points':pts,'source':str(row.get('source','自动')),'coherence':score,'contrast_score':contrast,'contour':contour,'edge_methods':methods,'neighbor_count':count,'compact_neighbor_count':compact,'threshold':threshold,'review_reason':reason})
+          selected=row.get('export_selected',True)
+          if not isinstance(selected,bool):raise ValueError('待导出状态无效。')
+          rows.append({'points':pts,'source':str(row.get('source','自动')),'coherence':score,'contrast_score':contrast,'contour':contour,'edge_methods':methods,'neighbor_count':count,'compact_neighbor_count':compact,'threshold':threshold,'review_reason':reason,'export_selected':selected})
       return rows
     rows=unpack(data['results']);unpaired=unpack(data.get('unpaired',[]));rejected=unpack(data.get('rejected',[]))
     runmeta=data.get('runmeta')

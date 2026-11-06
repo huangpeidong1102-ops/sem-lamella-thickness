@@ -4,6 +4,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFont
 import numpy as np, csv, os, io, base64, html
 from sem_analysis import detect, suggest_contrast_threshold, likely_same_lamella, find_uncertain_regions, review_tiles, enhance_sem_display, segment_inside_roi
 from sem_project import make_project, save_project, load_project, open_image, native_pixel_digest, pixel_digest
+from sem_queue_export import export_selected
 
 def same_output_file(left,right):
  if not left or not right:return False
@@ -52,7 +53,7 @@ class App:
  def __init__(self,root):
   self.root=root;root.title('SEM 片层厚度测量 · 三点法');root.geometry('1400x850');self.im=None;self.results=[];self.roi=None;self.scalepts=[];self.mode='';self.pending=[];self.zoom=1;self.photo=None;self.path='';self.runmeta=None;self.zoom_factor=1;self.edit_target=None;self.exclusions=[];self.unpaired=[];self.rejected=[];self.preview_unpaired=None;self.review_window=None;self.uncertain_regions=[];self.preview_region=None;self.region_window=None;self.boundary=tk.StringVar(value='half');self.parallel_only=tk.BooleanVar(value=True);self.neighbor_factor=6.;self.show_review=tk.BooleanVar(value=True);self.show_regions=tk.BooleanVar(value=True);self.auto_extra=tk.BooleanVar(value=True)
   menu=tk.Menu(root);files=tk.Menu(menu,tearoff=0);files.add_command(label='打开图片',command=self.open);files.add_command(label='保存工程',command=self.save_session);files.add_command(label='打开工程',command=self.load_session);menu.add_cascade(label='文件',menu=files);boundary_menu=tk.Menu(menu,tearoff=0);boundary_menu.add_radiobutton(label='局部半高边界',variable=self.boundary,value='half',command=self.boundary_changed);boundary_menu.add_radiobutton(label='分割轮廓边界（旧版）',variable=self.boundary,value='mask',command=self.boundary_changed);menu.add_cascade(label='边界方法',menu=boundary_menu);settings=tk.Menu(menu,tearoff=0);settings.add_command(label='估算对比阈值',command=self.suggest_threshold);settings.add_separator();settings.add_checkbutton(label='优先排列邻近平行候选',variable=self.parallel_only,command=self.parallel_changed);settings.add_command(label='调整平行邻距范围',command=self.set_neighbor_factor);settings.add_command(label='复核待选候选',command=self.open_review);settings.add_command(label='检查无法测量的区域',command=self.open_regions);settings.add_command(label='导出待审核标注图',command=self.export_review);settings.add_command(label='用其他阈值寻找待复核候选',command=self.explore_threshold);settings.add_checkbutton(label='识别时自动补充其他阈值候选',variable=self.auto_extra,command=self.auto_extra_changed);settings.add_separator();settings.add_command(label='绘制排除区',command=lambda:self.setmode('exclude'));settings.add_command(label='完成排除区',command=self.finish_exclusion);settings.add_command(label='清空所有排除区',command=self.clear_exclusions);menu.add_cascade(label='工具',menu=settings);root.config(menu=menu)
-  self.rejected_window=None;self.source_digest=None;self.display_mode=tk.StringVar(value='原图');self.display_cache={};self.auto_fine=tk.BooleanVar(value=True);settings.add_command(label='找回已丢弃的候选',command=self.open_rejected);settings.add_command(label='设置细小组织候选参数',command=self.fine_preset);settings.add_checkbutton(label='默认参数无候选时补充细小候选',variable=self.auto_fine);settings.add_command(label='导出伪彩增强图片',command=self.export_color_preview)
+  self.rejected_window=None;self.queue_window=None;self.source_digest=None;self.display_mode=tk.StringVar(value='原图');self.display_cache={};self.auto_fine=tk.BooleanVar(value=True);settings.add_command(label='找回已丢弃的候选',command=self.open_rejected);settings.add_command(label='设置细小组织候选参数',command=self.fine_preset);settings.add_checkbutton(label='默认参数无候选时补充细小候选',variable=self.auto_fine);settings.add_command(label='导出伪彩增强图片',command=self.export_color_preview)
   side=ttk.Frame(root,padding=10,width=300);side.pack(side='left',fill='y');side.pack_propagate(False)
   area=ttk.Frame(root);area.pack(side='right',fill='both',expand=True)
   ttk.Label(side,text='SEM 片层厚度测量',font=('Microsoft YaHei',16,'bold')).pack(anchor='w');ttk.Label(side,text='导入 → 校准 → 选区 → 识别 → 核对',wraplength=280).pack(anchor='w',pady=6)
@@ -74,6 +75,7 @@ class App:
   bar=ttk.Frame(area);bar.pack(fill='x');self.review_count=tk.StringVar(value='待复核 0')
   for label,factor in [('放大',1.5),('缩小',1/1.5),('适合窗口',0)]:ttk.Button(bar,text=label,command=lambda f=factor:self.setzoom(f)).pack(side='left')
   ttk.Button(bar,textvariable=self.review_count,command=self.open_review).pack(side='left',padx=4)
+  ttk.Button(bar,text='待导出清单 / Excel',command=self.open_export_queue).pack(side='left',padx=4)
   ttk.Checkbutton(bar,text='显示待审核',variable=self.show_review,command=self.render).pack(side='left')
   ttk.Button(bar,text='修正选中片层三点',command=self.edit_selected).pack(side='left',padx=4)
   ttk.Button(bar,text='删除选中片层',command=self.remove_selected).pack(side='left',padx=4)
@@ -303,13 +305,59 @@ class App:
  def restore_rejected(self):
   if self.rejected_window is None or not self.rejected_list.curselection():self.info.set('请先选择已丢弃候选。');return
   item=self.rejected.pop(self.rejected_list.curselection()[0]);self.unpaired.append(item);self.close_rejected();self.refresh();self.info.set('候选已找回待复核；尚未计入统计。');self.open_review();self.review_list.selection_set(len(self.unpaired)-1);self.review_list.see(len(self.unpaired)-1);self.review_preview()
+ def open_export_queue(self):
+  if self.queue_window is not None:
+   self.queue_window.lift();self.update_export_queue();return
+  win=tk.Toplevel(self.root);self.queue_window=win;win.title('待导出清单');win.geometry('640x480')
+  ttk.Label(win,text='已确认的测量默认加入待导出。可多选后加入或移出；移出不会删除测量。',wraplength=600).pack(fill='x',padx=10,pady=8)
+  frame=ttk.Frame(win);frame.pack(fill='both',expand=True,padx=10)
+  scroll=ttk.Scrollbar(frame,orient='vertical');self.queue_list=tk.Listbox(frame,selectmode='extended',exportselection=False,yscrollcommand=scroll.set);scroll.config(command=self.queue_list.yview);scroll.pack(side='right',fill='y');self.queue_list.pack(side='left',fill='both',expand=True)
+  buttons=ttk.Frame(win);buttons.pack(fill='x',padx=10,pady=6)
+  ttk.Button(buttons,text='全选列表',command=lambda:self.queue_list.selection_set(0,'end')).pack(side='left')
+  ttk.Button(buttons,text='加入选中',command=lambda:self.set_queue_selection(True)).pack(side='left',padx=3)
+  ttk.Button(buttons,text='移出选中',command=lambda:self.set_queue_selection(False)).pack(side='left',padx=3)
+  ttk.Button(win,text='导出待导出项目：Excel 和标注图',command=self.export_queue).pack(fill='x',padx=10,pady=6)
+  def close():
+   self.queue_window=None;win.destroy()
+  win.protocol('WM_DELETE_WINDOW',close);self.update_export_queue()
+ def update_export_queue(self):
+  if self.queue_window is None:return
+  selected=self.queue_list.curselection();self.queue_list.delete(0,'end');f=self.factor()
+  for i,item in enumerate(self.results,1):
+   value=sum(p[2] for p in item['points'])/3
+   label=f'{value*f:.4g} {self.unit.get()}' if f else f'{value:.4g} 像素'
+   self.queue_list.insert('end',f'{"[待导出]" if item.get("export_selected",True) else "[已移出]"}  已确认 {i}   {label}   {item.get("source","")}')
+  for i in selected:
+   if i<len(self.results):self.queue_list.selection_set(i)
+  count=sum(item.get('export_selected',True) for item in self.results)
+  self.queue_window.title(f'待导出清单（{count} 条）')
+ def set_queue_selection(self,selected):
+  indexes=self.queue_list.curselection()
+  if not indexes:self.info.set('请先在待导出清单中选择项目。');return
+  for i in indexes:self.results[i]['export_selected']=selected
+  self.update_export_queue();self.info.set('待导出清单已更新；保存工程可保留选择。')
+ def export_queue(self):
+  items=[item for item in self.results if item.get('export_selected',True)];factor=self.factor()
+  if not items or not factor or not self.runmeta:
+   messagebox.showwarning('无法导出','请先校准，并至少将一条已确认测量加入待导出清单。');return
+  path=filedialog.asksaveasfilename(title='保存 Excel 和标注图',defaultextension='.xlsx',filetypes=[('Excel 工作簿','*.xlsx')])
+  if not path:return
+  if os.path.splitext(path)[1].lower()!='.xlsx':messagebox.showerror('无法导出','请使用 .xlsx 文件名。');return
+  imagepath=os.path.splitext(path)[0]+'_标注.png'
+  if any(same_output_file(p,self.path) for p in (path,imagepath)):
+   messagebox.showerror('无法导出','导出文件不能覆盖原始图片。');return
+  existing=[p for p in (path,imagepath) if os.path.exists(p)]
+  if existing and not messagebox.askyesno('覆盖已有文件','以下文件已存在：\n'+'\n'.join(os.path.basename(p) for p in existing)+'\n确定覆盖吗？'):return
+  try:export_selected(self.im,self.path,path,items,factor,self.unit.get(),self.runmeta,self.scalepts,len(self.unpaired),len(self.pending_regions()))
+  except Exception as e:messagebox.showerror('导出失败',str(e));return
+  self.info.set(f'已导出 {len(items)} 条待导出测量的 Excel 和标注图；待审核项目未计入。')
  def open_review(self):
   if not self.unpaired:self.info.set('没有待复核的候选。');return
   self.close_rejected()
   if self.review_window is not None:
    self.review_window.lift();return
   win=tk.Toplevel(self.root);self.review_window=win;win.title('待复核候选');win.geometry('400x410')
-  ttk.Label(win,text='候选未计入统计。划痕、成像条纹或噪声也可能被识别；请结合原图判断，接纳后才计入。',wraplength=370).pack(fill='x',padx=10,pady=8)
+  ttk.Label(win,text='选择候选后按 Enter 接纳并加入待导出清单；审核后自动定位下一条。划痕、成像条纹或噪声也可能被识别，请结合原图判断。',wraplength=370).pack(fill='x',padx=10,pady=8)
   frame=ttk.Frame(win);frame.pack(fill='both',expand=True,padx=10);scroll=ttk.Scrollbar(frame,orient='vertical');self.review_list=tk.Listbox(frame,exportselection=False,yscrollcommand=scroll.set);scroll.config(command=self.review_list.yview);scroll.pack(side='right',fill='y');self.review_list.pack(side='left',fill='both',expand=True)
   self.review_list.bind('<<ListboxSelect>>',lambda e:self.review_preview())
   ttk.Button(win,text='定位并放大选中候选',command=self.zoom_review).pack(fill='x',padx=10,pady=(4,0))
@@ -317,7 +365,8 @@ class App:
   ttk.Button(buttons,text='接纳选中候选',command=self.accept_unpaired).pack(side='left')
   ttk.Button(buttons,text='丢弃选中候选',command=self.discard_unpaired).pack(side='left',padx=5)
   ttk.Button(buttons,text='关闭',command=self.dismiss_review).pack(side='right')
-  win.protocol('WM_DELETE_WINDOW',self.dismiss_review);self.update_review()
+  win.bind('<Return>',lambda e:(self.accept_unpaired(),'break')[-1]);win.protocol('WM_DELETE_WINDOW',self.dismiss_review);self.update_review()
+  if self.unpaired:self.review_list.selection_set(0);self.review_list.activate(0);self.review_list.focus_set();self.review_preview()
  def update_review(self):
   if self.review_window is None:return
   self.review_count.set(f'待复核 {len(self.unpaired)}');self.review_list.delete(0,'end');factor=self.factor()
@@ -357,7 +406,10 @@ class App:
   if any(p[2]<5 for p in item['points']) and not messagebox.askyesno('测点像素不足','至少一个测点小于 5 像素。细小组织的测量误差可能很大，建议使用更高分辨率原图；请确认边界及测点后再决定。仍要接纳吗？'):return
   refs=duplicate_references(item,[],0,self.results)
   if refs and not messagebox.askyesno('可能重复','该候选可能与 '+ '、'.join(refs)+' 重合。请检查三点位置；仍要接纳吗？'):return
-  self.unpaired.pop(idx);item['source']='人工接纳';self.results.append(item);self.refresh();self.update_review();self.info.set(f'已接纳一条；还有 {len(self.unpaired)} 条待复核。')
+  self.unpaired.pop(idx);item['source']='人工接纳';item['export_selected']=True;self.results.append(item);self.refresh();self.update_review()
+  if self.unpaired:
+   nextidx=min(idx,len(self.unpaired)-1);self.review_list.selection_set(nextidx);self.review_list.activate(nextidx);self.review_list.see(nextidx);self.review_list.focus_set();self.review_preview()
+  self.info.set(f'已接纳并加入待导出；还有 {len(self.unpaired)} 条待复核。')
  def discard_unpaired(self):
   if self.review_window is None or not self.review_list.curselection():self.info.set('请先选择待复核候选。');return
   self.rejected.append(self.unpaired.pop(self.review_list.curselection()[0]));self.update_review();self.info.set(f'已丢弃一条；还有 {len(self.unpaired)} 条待复核。')
@@ -551,6 +603,7 @@ class App:
    a,b,_=item['points'][1];c.create_text(*conv(a),text=str(i),anchor='sw',fill='yellow',font=('Arial',9,'bold'))
  def refresh(self):
   self.review_count.set(f'待复核 {len(self.unpaired)}');self.region_count.set(f'待辨区域 {len(self.pending_regions())}')
+  if self.queue_window is not None:self.update_export_queue()
   for i in self.table.get_children():self.table.delete(i)
   f=self.factor();scope=self.roi_from(self.runmeta.get('roi'),self.runmeta.get('exclusions',[])) if self.im is not None and self.runmeta and self.results else None
   for i,item in enumerate(self.results,1):
